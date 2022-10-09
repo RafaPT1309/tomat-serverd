@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: tomcatserver
+Parameters:
+  AwsRegion:
+    Type: String
+    Description: Please enter the AWS region example:us-east-1
+    Default: us-east-1
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+      - us-west-1
+      - us-west-2
+      - ap-east-1
+      - ca-central-1
+      - eu-west-1
+      - eu-nort-1
+      - sa-east-1
+      - us-west-2
+      - me-central-1
+  AmiID:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Description: Query for the latest Amazon Linux AMI IDs using AWS Systems Manager Parameter Store
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+  VPCId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: Please enter the VPCId.
+  SubnetId:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: Please enter the subnetId.
+  InstanceType:
+    Type: String
+    Default: t3a.medium
+    AllowedValues:
+      - t3a.xlarge
+      - t3a.medium
+      - t3a.2xlarge
+      - t3a.large
+      - t3a.small
+    Description: Please enter the instance type example t3a.medium,t3a.large,t3a.xlarge,t3a.2xlarge
+  tomcatv:
+    Type: String
+    Description: Please enter the version of tomcat the best recomedation use de version default
+    Default: 9.0.67
+    AllowedValues:
+      - 8.5.82 
+      - 9.0.67
+      - 10.0.26 
+      - 10.1.0
+  tomcatuser:
+    Type: String
+    Description: Please Insert your user 
+  tomcatpasword:
+    Type: String
+    Description: Please Insert your pasword
+  KeyPairName:
+    Type: String
+    Description: The name of an existing Amazon EC2 key pair in this region to use to SSH into the Amazon EC2 instances.      
+Resources:
+  tomcatserverSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-SG'
+      VpcId: !Ref VPCId
+      GroupDescription: "Allow SSH/HTTPS/8834"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0    
+  Ec2SsmIamRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess            
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+  Ec2SsmInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Path: /
+      Roles: [!Ref Ec2SsmIamRole]        
+  tomcatserver:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiID
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      SecurityGroupIds:
+        - !Ref tomcatserverSecurityGroup
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref Ec2SsmInstanceProfile
+      UserData:
+        Fn::Base64: 
+          !Sub |
+            #!/bin/bash -xe 
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+            sudo yum update -y && sudo yum upgrade -y
+            sudo yum install -y install wget
+            sudo amazon-linux-extras install java-openjdk11
+            sudo groupadd --system tomcat
+            sudo useradd -d /usr/share/tomcat -r -s /bin/false -g tomcat tomcat
+            wget https://archive.apache.org/dist/tomcat/tomcat-9/v'${tomcatv}'/bin/apache-tomcat-'${tomcatv}'.tar.gz
+            sudo tar xvf apache-tomcat-'${tomcatv}'.tar.gz -C /usr/share/
+            sudo ln -s /usr/share/apache-tomcat-'${tomcatv}'/ /usr/share/tomcat
+            sudo chown -R tomcat:tomcat /usr/share/tomcat
+            sudo chown -R tomcat:tomcat /usr/share/apache-tomcat-'${tomcatv}'/ 
+            sudo tee /etc/systemd/system/tomcat.service<<EOF
+            [Unit]
+            Description=Tomcat Server
+            After=syslog.target network.target
+            [Service]
+            Type=forking
+            User=tomcat
+            Group=tomcat
+            Environment=JAVA_HOME=/usr/lib/jvm/jre
+            Environment='JAVA_OPTS=-Djava.awt.headless=true'
+            Environment=CATALINA_HOME=/usr/share/tomcat
+            Environment=CATALINA_BASE=/usr/share/tomcat
+            Environment=CATALINA_PID=/usr/share/tomcat/temp/tomcat.pid
+            Environment='CATALINA_OPTS=-Xms512M -Xmx1024M'
+            ExecStart=/usr/share/tomcat/bin/catalina.sh start
+            ExecStop=/usr/share/tomcat/bin/catalina.sh stop
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            sudo rm -rf /usr/share/tomcat/conf/tomcat-users.xml
+            sudo tee /usr/share/tomcat/conf/tomcat-users.xml<<EOF
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!--
+              Licensed to the Apache Software Foundation (ASF) under one or more
+              contributor license agreements.  See the NOTICE file distributed with
+              this work for additional information regarding copyright ownership.
+              The ASF licenses this file to You under the Apache License, Version 2.0
+              (the "License"); you may not use this file except in compliance with
+              the License.  You may obtain a copy of the License at
+
+                  http://www.apache.org/licenses/LICENSE-2.0
+
+              Unless required by applicable law or agreed to in writing, software
+              distributed under the License is distributed on an "AS IS" BASIS,
+              WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+              See the License for the specific language governing permissions and
+              limitations under the License.
+            -->
+            <tomcat-users xmlns="http://tomcat.apache.org/xml"
+                          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                          xsi:schemaLocation="http://tomcat.apache.org/xml tomcat-users.xsd"
+                          version="1.0">
+            <!--
+              By default, no user is included in the "manager-gui" role required
+              to operate the "/manager/html" web application.  If you wish to use this app,
+              you must define such a user - the username and password are arbitrary.
+
+              Built-in Tomcat manager roles:
+                - manager-gui    - allows access to the HTML GUI and the status pages
+                - manager-script - allows access to the HTTP API and the status pages
+                - manager-jmx    - allows access to the JMX proxy and the status pages
+                - manager-status - allows access to the status pages only
+
+              The users below are wrapped in a comment and are therefore ignored. If you
+              wish to configure one or more of these users for use with the manager web
+              application, do not forget to remove the <!.. ..> that surrounds them. You
+              will also need to set the passwords to something appropriate.
+            -->
+            <!--
+              <user username="admin" password="<must-be-changed>" roles="manager-gui"/>
+              <user username="robot" password="<must-be-changed>" roles="manager-script"/>
+            -->
+            <!--
+              The sample user and role entries below are intended for use with the
+              examples web application. They are wrapped in a comment and thus are ignored
+              when reading this file. If you wish to configure these users for use with the
+              examples web application, do not forget to remove the <!.. ..> that surrounds
+              them. You will also need to set the passwords to something appropriate.
+            -->
+            <!--
+              <role rolename="tomcat"/>
+              <role rolename="role1"/>
+              <user username="tomcat" password="<must-be-changed>" roles="tomcat"/>
+              <user username="both" password="<must-be-changed>" roles="tomcat,role1"/>
+              <user username="role1" password="<must-be-changed>" roles="role1"/>
+            -->
+            <role rolename="admin-gui"/>
+            <role rolename="manager-gui"/>
+            <user username="${tomcatuser}" password="${tomcatpasword}" fullName="Administrator" roles="admin-gui,manager-gui"/>
+            </tomcat-users>
+            EOF
+            sudo mv /usr/share/tomcat/webapps/manager/META-INF/context.xml /usr/share/tomcat/webapps/manager/META-INF/context.xml.bck
+            sudo tee /usr/share/tomcat/webapps/manager/META-INF/context.xml<<EOF
+            <?xml version="1.0" encoding="UTF-8"?>
+            <!--
+              Licensed to the Apache Software Foundation (ASF) under one or more
+              contributor license agreements.  See the NOTICE file distributed with
+              this work for additional information regarding copyright ownership.
+              The ASF licenses this file to You under the Apache License, Version 2.0
+              (the "License"); you may not use this file except in compliance with
+              the License.  You may obtain a copy of the License at
+
+                  http://www.apache.org/licenses/LICENSE-2.0
+                  
+              Unless required by applicable law or agreed to in writing, software
+              distributed under the License is distributed on an "AS IS" BASIS,
+              WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+              See the License for the specific language governing permissions and
+              limitations under the License.
+            -->
+            <Context antiResourceLocking="false" privileged="true" >
+              <CookieProcessor className="org.apache.tomcat.util.http.Rfc6265CookieProcessor"
+                              sameSiteCookies="strict" />
+            <!--
+              <Valve className="org.apache.catalina.valves.RemoteAddrValve"
+                    allow="127\.\d+\.\d+\.\d+|::1|0:0:0:0:0:0:0:1" />
+            -->
+            <Valve className="org.apache.catalina.valves.RemoteAddrValve"
+                    allow="\d+\.\d+\.\d+\.\d+" />
+              <Manager sessionAttributeValueClassNameFilter="java\.lang\.(?:Boolean|Integer|Long|Number|String)|org\.apache\.catalina\.filters\.CsrfPreventionFilter\$LruCache(?:\$1)?|java\.util\.(?:Linked)?HashMap"/>
+            </Context>
+            EOF
+            sudo systemctl daemon-reload
+            sudo systemctl start tomcat
+            sudo systemctl enable tomcat
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-EC2'
+Outputs:
+  InstanceId:
+    Description: tomcatserver InstanceId 
+    Value: !Ref 'tomcatserver'
+  SgId:
+    Description: tomcatserver SG Id 
+    Value: !Ref 'tomcatserverSecurityGroup'
